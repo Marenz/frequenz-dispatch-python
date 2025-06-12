@@ -20,6 +20,7 @@ from frequenz.channels.timer import SkipMissedAndResync, Timer
 from frequenz.client.dispatch import DispatchApiClient
 from frequenz.client.dispatch.types import Event
 from frequenz.sdk.actor import BackgroundService
+from typing_extensions import override
 
 from ._dispatch import Dispatch
 from ._event import Created, Deleted, DispatchEvent, Updated
@@ -219,8 +220,15 @@ class DispatchScheduler(BackgroundService):
 
     # pylint: enable=redefined-builtin
 
+    @override
+    async def stop(self, msg: str | None = None) -> None:
+        """Stop the background service."""
+        self._next_event_timer.close()
+        await super().stop(msg)
+
     def start(self) -> None:
         """Start the background service."""
+        self._next_event_timer.reset(interval=timedelta(seconds=1))
         self._tasks.add(asyncio.create_task(self._run()))
 
     async def _run(self) -> None:
