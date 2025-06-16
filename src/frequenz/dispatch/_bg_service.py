@@ -10,6 +10,7 @@ import functools
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from heapq import heappop, heappush
@@ -20,7 +21,6 @@ from frequenz.channels.timer import SkipMissedAndResync, Timer
 from frequenz.client.dispatch import DispatchApiClient
 from frequenz.client.dispatch.types import Event
 from frequenz.sdk.actor import BackgroundService
-from typing_extensions import override
 
 from ._dispatch import Dispatch
 from ._event import Created, Deleted, DispatchEvent, Updated
@@ -192,6 +192,10 @@ class DispatchScheduler(BackgroundService):
         if not self._tasks:
             raise RuntimeError("Dispatch service not started")
 
+        (task,) = self._tasks
+        if task.done():
+            raise RuntimeError("Dispatch service not running")
+
         # Find all matching dispatches based on the type and collect them
         dispatches = [
             dispatch for dispatch in self._dispatches.values() if dispatch.type == type
@@ -220,15 +224,8 @@ class DispatchScheduler(BackgroundService):
 
     # pylint: enable=redefined-builtin
 
-    @override
-    async def stop(self, msg: str | None = None) -> None:
-        """Stop the background service."""
-        self._next_event_timer.close()
-        await super().stop(msg)
-
     def start(self) -> None:
         """Start the background service."""
-        self._next_event_timer.reset(interval=timedelta(seconds=1))
         self._tasks.add(asyncio.create_task(self._run()))
 
     async def _run(self) -> None:
@@ -244,32 +241,43 @@ class DispatchScheduler(BackgroundService):
         stream = self._client.stream(microgrid_id=self._microgrid_id)
 
         # Streaming updates
-        async for selected in select(self._next_event_timer, stream):
-            if selected_from(selected, self._next_event_timer):
-                if not self._scheduled_events:
-                    continue
-                await self._execute_scheduled_event(
-                    heappop(self._scheduled_events).dispatch
-                )
-            elif selected_from(selected, stream):
-                _logger.debug("Received dispatch event: %s", selected.message)
-                dispatch = Dispatch(selected.message.dispatch)
-                match selected.message.event:
-                    case Event.CREATED:
-                        self._dispatches[dispatch.id] = dispatch
-                        await self._update_dispatch_schedule_and_notify(dispatch, None)
-                        await self._lifecycle_events_tx.send(Created(dispatch=dispatch))
-                    case Event.UPDATED:
-                        await self._update_dispatch_schedule_and_notify(
-                            dispatch, self._dispatches[dispatch.id]
-                        )
-                        self._dispatches[dispatch.id] = dispatch
-                        await self._lifecycle_events_tx.send(Updated(dispatch=dispatch))
-                    case Event.DELETED:
-                        self._dispatches.pop(dispatch.id)
-                        await self._update_dispatch_schedule_and_notify(None, dispatch)
+        with closing(self._next_event_timer) as next_event_timer:
+            async for selected in select(next_event_timer, stream):
+                if selected_from(selected, next_event_timer):
+                    if not self._scheduled_events:
+                        continue
+                    await self._execute_scheduled_event(
+                        heappop(self._scheduled_events).dispatch
+                    )
+                elif selected_from(selected, stream):
+                    _logger.debug("Received dispatch event: %s", selected.message)
+                    dispatch = Dispatch(selected.message.dispatch)
+                    match selected.message.event:
+                        case Event.CREATED:
+                            self._dispatches[dispatch.id] = dispatch
+                            await self._update_dispatch_schedule_and_notify(
+                                dispatch, None
+                            )
+                            await self._lifecycle_events_tx.send(
+                                Created(dispatch=dispatch)
+                            )
+                        case Event.UPDATED:
+                            await self._update_dispatch_schedule_and_notify(
+                                dispatch, self._dispatches[dispatch.id]
+                            )
+                            self._dispatches[dispatch.id] = dispatch
+                            await self._lifecycle_events_tx.send(
+                                Updated(dispatch=dispatch)
+                            )
+                        case Event.DELETED:
+                            self._dispatches.pop(dispatch.id)
+                            await self._update_dispatch_schedule_and_notify(
+                                None, dispatch
+                            )
 
-                        await self._lifecycle_events_tx.send(Deleted(dispatch=dispatch))
+                            await self._lifecycle_events_tx.send(
+                                Deleted(dispatch=dispatch)
+                            )
 
     async def _execute_scheduled_event(self, dispatch: Dispatch) -> None:
         """Execute a scheduled event.
