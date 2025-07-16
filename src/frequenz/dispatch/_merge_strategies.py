@@ -58,7 +58,8 @@ class MergeByType(MergeStrategy):
         )
 
         _logger.debug(
-            "stop event %s because other_dispatches_running=%s",
+            "%s stop event %s because other_dispatches_running=%s",
+            "Ignoring" if other_dispatches_running else "Allowing",
             dispatch.id,
             other_dispatches_running,
         )
