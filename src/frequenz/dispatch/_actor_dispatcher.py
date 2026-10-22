@@ -142,7 +142,7 @@ class ActorDispatcher(BackgroundService):
 
             @override
             async def _run(self) -> None:
-                other_recv: Receiver[Any] = ...
+                other_recv: Receiver[Any] = Broadcast[Any](name="other").new_receiver()
 
                 if self._dispatch_updates_receiver is None:
                     async for msg in other_recv:
